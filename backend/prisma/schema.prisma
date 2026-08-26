@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+model UserData {
+  id               Int      @id @default(autoincrement())
+  userId           Int      @unique
+  profile          Json?
+  financeCompleted Json?
+  budget           Json?
+  skills           Json?
+  savedJobs        Json?
+  resume           Json?
+  careerProfile    Json?
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      Role     @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  mentorProfile MentorProfile?
+  mentorRequests MentorRequest[]
+  userData UserData?
+}
+
+
+model MentorProfile {
+  id                Int      @id @default(autoincrement())
+  userId            Int      @unique
+  bio               String?
+  profession        String?
+  experience        Int?
+  verificationStatus VerificationStatus @default(PENDING)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  requests MentorRequest[]
+}
+model MentorRequest {
+  id              Int      @id @default(autoincrement())
+  userId          Int
+  mentorProfileId Int
+  status          String   @default("PENDING")
+  createdAt       DateTime @default(now())
+
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mentorProfile  MentorProfile @relation(fields: [mentorProfileId], references: [id], onDelete: Cascade)
+}
+
+enum Role {
+  USER
+  MENTOR
+  ADMIN
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
