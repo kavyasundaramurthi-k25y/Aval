@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Volume2, Mic, X, Square, MessageCircle, Send } from "lucide-react";
 
-const BACKEND_URL = "http://localhost:5000";
+const BACKEND_URL = import.meta.env.VITE_API_URL;
 
 const LANGUAGE_META = {
   en: { speech: "en-IN", name: "English", placeholder: "Type a message...", listening: "Listening..." },

@@ -6,7 +6,8 @@ import {
   MapPin, Clock, Shield, Heart, RotateCcw, Loader2, BookOpen, Circle
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
-const BACKEND_URL = "http://localhost:5000";
+import { Document, Page, View, Text as PdfText, Image as PdfImage, StyleSheet, PDFViewer, pdf } from "@react-pdf/renderer";
+const BACKEND_URL = import.meta.env.VITE_API_URL;
 
 /* =========================================================================
    AVAL — financial independence + career restart platform for homemakers.
@@ -628,9 +629,10 @@ backgroundRepeat: "no-repeat",
   lang={lang}
   setLang={setLang}
   userName={app.user.name}
-  onLogout={() => {
+    onLogout={() => {
     localStorage.removeItem("aval_token");
-    update({ user: null });
+    setApp(initialAppState);
+    setCareerProfile(null);
     goTo("landing");
   }}
 />
@@ -638,12 +640,33 @@ backgroundRepeat: "no-repeat",
 
       {page === "landing" && <Landing t={t} lang={lang} setLang={setLang} onStart={() => { setAuthMode("signup"); goTo("auth"); }} onHow={() => goTo("auth")} />}
       {page === "auth" && (<AuthPage
-      t={t}
+    t={t}
     lang={lang}
     authMode={authMode}
     setAuthMode={setAuthMode}
-    onAuthSuccess={(user, mode) => {
-      update({ user });
+    onAuthSuccess={async (user, mode, token) => {
+      setApp({ ...initialAppState, user });
+      setCareerProfile(null);
+
+      if (mode === "login") {
+        const savedRes = await fetch(`${BACKEND_URL}/api/user-data`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const savedData = await savedRes.json();
+        if (savedData.success && savedData.userData) {
+          const d = savedData.userData;
+          update({
+            profile: d.profile || initialAppState.profile,
+            financeCompleted: d.financeCompleted || [],
+            budget: d.budget || initialAppState.budget,
+            skills: d.skills || null,
+            savedJobs: d.savedJobs || [],
+            resume: d.resume || null,
+            onboarded: !!d.profile,
+          });
+          setCareerProfile(d.careerProfile || null);
+        }
+      }
       goTo(mode === "signup" ? "onboarding" : "dashboard");
     }}
   />
@@ -667,7 +690,7 @@ backgroundRepeat: "no-repeat",
         onToggleSave={(id) => update({ savedJobs: app.savedJobs.includes(id) ? app.savedJobs.filter((j) => j !== id) : [...app.savedJobs, id] })}
       />
     )}
-    {page === "resume" && <ResumePage t={t} lang={lang} resume={app.resume} onSave={(resume) => update({ resume })} />}
+    {page === "resume" && <ResumePage t={t} lang={lang} resume={app.resume} onSave={(resume) => update({ resume })} user={app.user} />}
     {page === "mentors" && <MentorsPage t={t} lang={lang} />}
     {page === "readiness" && <ReadinessPage t={t} lang={lang} steps={readinessCompletion} goTo={goTo} />}
   </div>
@@ -895,7 +918,7 @@ function AuthPage({ t, lang, authMode, setAuthMode, onAuthSuccess }) {
       }
 
       localStorage.setItem("aval_token", data.token);
-      onAuthSuccess(data.user, authMode);
+      onAuthSuccess(data.user, authMode,data.token);
     } catch (err) {
       console.error(err);
       setError("Could not reach the server. Please try again.");
@@ -1894,9 +1917,15 @@ function CareerRecommendationCard({ rec, onSave, saved }) {
         <p className="text-xs text-stone-500">Worth considering</p>
         <p className="text-sm text-stone-700">{rec.job.challenges}</p>
       </div>
-      <PrimaryButton onClick={() => onSave(rec.job.id)} disabled={saved} className="w-full mt-4 py-2 text-sm">
-        {saved ? "Saved" : "Save this recommendation"}
-      </PrimaryButton>
+      <PrimaryButton
+  onClick={() => onSave(rec.job.id)}
+  disabled={saved}
+  className="w-full mt-4 py-2 text-sm"
+>
+  <span style={{ color: "#333333" }}>
+    {saved ? "Saved" : "Save this recommendation"}
+  </span>
+</PrimaryButton>
     </Card>
   );
 }
@@ -1991,52 +2020,356 @@ function JobsPage({ t, lang, savedJobs, onToggleSave, skills }) {
 }
 
 /* ---------------------------- Resume ---------------------------- */
+const pdfStyles = StyleSheet.create({
+  page: { flexDirection: "row", backgroundColor: "#ffffff", fontFamily: "Helvetica", fontSize: 9.5, color: "#1a1a1a" },
+  leftCol: { width: "34%", backgroundColor: "#f6f4ef", padding: 22 },
+  rightCol: { width: "66%", padding: 26 },
+  photo: { width: 88, height: 88, borderRadius: 44, marginBottom: 14, alignSelf: "center" },
+  sectionTitleLeft: { fontSize: 9.5, fontWeight: 700, letterSpacing: 1, color: "#7a1f2b", marginTop: 16, marginBottom: 6, textTransform: "uppercase" },
+  sectionTitleRight: { fontSize: 11, fontWeight: 700, letterSpacing: 1, color: "#7a1f2b", marginTop: 14, marginBottom: 6, textTransform: "uppercase", borderBottomWidth: 1, borderBottomColor: "#7a1f2b", paddingBottom: 3 },
+  bodyText: { fontSize: 9.5, lineHeight: 1.5, marginBottom: 3 },
+  name: { fontSize: 22, fontWeight: 700, color: "#111111" },
+  jobTitleText: { fontSize: 12, color: "#555555", marginTop: 2, marginBottom: 4 },
+  entryHeader: { fontSize: 10.5, fontWeight: 700, marginTop: 8 },
+  entrySub: { fontSize: 9, color: "#666666", marginBottom: 4 },
+  bulletRow: { flexDirection: "row", marginBottom: 2 },
+  bulletDot: { width: 9, fontSize: 9.5 },
+  bulletText: { flex: 1, fontSize: 9.5, lineHeight: 1.4 },
+  skillLine: { fontSize: 9, marginBottom: 3 },
+});
 
-function ResumePage({ t, lang, resume, onSave }) {
-  const [form, setForm] = useState(resume || { experience: "", education: "", skills: "", certifications: "", volunteer: "", household: "", breakDuration: "" });
-  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+function ResumePDFDocument({ data }) {
+  const experience = (data.experience || []).filter((e) => e.title || e.company);
+  const education = (data.education || []).filter((e) => e.degree || e.institution);
+  const skills = (data.skills || []).map((s) => s.trim()).filter(Boolean);
+  const languages = (data.languages || []).map((s) => s.trim()).filter(Boolean);
+  const certifications = (data.certifications || []).map((s) => s.trim()).filter(Boolean);
+  const volunteer = (data.volunteer || []).map((s) => s.trim()).filter(Boolean);
+  const household = (data.household || []).map((s) => s.trim()).filter(Boolean);
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-10">
+    <Document>
+      <Page size="A4" style={pdfStyles.page}>
+        <View style={pdfStyles.leftCol}>
+          {data.photo ? <PdfImage src={data.photo} style={pdfStyles.photo} /> : null}
+          {data.summary ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleLeft}>Profile</PdfText>
+              <PdfText style={pdfStyles.bodyText}>{data.summary}</PdfText>
+            </View>
+          ) : null}
+          <View>
+            <PdfText style={pdfStyles.sectionTitleLeft}>Contact</PdfText>
+            {data.phone ? <PdfText style={pdfStyles.bodyText}>{data.phone}</PdfText> : null}
+            {data.email ? <PdfText style={pdfStyles.bodyText}>{data.email}</PdfText> : null}
+            {data.location ? <PdfText style={pdfStyles.bodyText}>{data.location}</PdfText> : null}
+            {data.linkedin ? <PdfText style={pdfStyles.bodyText}>{data.linkedin}</PdfText> : null}
+          </View>
+          {skills.length > 0 ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleLeft}>Skills</PdfText>
+              {skills.map((s, i) => (
+                <PdfText key={i} style={pdfStyles.skillLine}>• {s}</PdfText>
+              ))}
+            </View>
+          ) : null}
+          {languages.length > 0 ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleLeft}>Languages</PdfText>
+              {languages.map((l, i) => (
+                <PdfText key={i} style={pdfStyles.skillLine}>{l}</PdfText>
+              ))}
+            </View>
+          ) : null}
+        </View>
+
+        <View style={pdfStyles.rightCol}>
+          <PdfText style={pdfStyles.name}>{data.fullName || "Your Name"}</PdfText>
+          {data.jobTitle ? <PdfText style={pdfStyles.jobTitleText}>{data.jobTitle}</PdfText> : null}
+          {experience.length > 0 ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleRight}>Professional Experience</PdfText>
+              {experience.map((e, i) => (
+                <View key={i} style={{ marginBottom: 8 }}>
+                  <PdfText style={pdfStyles.entryHeader}>{[e.title, e.company].filter(Boolean).join(" | ")}</PdfText>
+                  <PdfText style={pdfStyles.entrySub}>{[e.duration, e.location].filter(Boolean).join(" | ")}</PdfText>
+                  {(e.bullets || []).map((b) => b.trim()).filter(Boolean).map((b, j) => (
+                    <View key={j} style={pdfStyles.bulletRow}>
+                      <PdfText style={pdfStyles.bulletDot}>•</PdfText>
+                      <PdfText style={pdfStyles.bulletText}>{b}</PdfText>
+                    </View>
+                  ))}
+                </View>
+              ))}
+            </View>
+          ) : null}
+          {household.length > 0 ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleRight}>Household &amp; Community Management</PdfText>
+              {household.map((b, i) => (
+                <View key={i} style={pdfStyles.bulletRow}>
+                  <PdfText style={pdfStyles.bulletDot}>•</PdfText>
+                  <PdfText style={pdfStyles.bulletText}>{b}</PdfText>
+                </View>
+              ))}
+            </View>
+          ) : null}
+          {education.length > 0 ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleRight}>Education</PdfText>
+              {education.map((ed, i) => (
+                <View key={i} style={{ marginBottom: 6 }}>
+                  <PdfText style={pdfStyles.entryHeader}>{ed.degree}</PdfText>
+                  <PdfText style={pdfStyles.entrySub}>{[ed.institution, ed.year, ed.location].filter(Boolean).join(" | ")}</PdfText>
+                </View>
+              ))}
+            </View>
+          ) : null}
+          {certifications.length > 0 ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleRight}>Certifications</PdfText>
+              {certifications.map((c, i) => (
+                <View key={i} style={pdfStyles.bulletRow}>
+                  <PdfText style={pdfStyles.bulletDot}>•</PdfText>
+                  <PdfText style={pdfStyles.bulletText}>{c}</PdfText>
+                </View>
+              ))}
+            </View>
+          ) : null}
+          {volunteer.length > 0 ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleRight}>Volunteer / Community Experience</PdfText>
+              {volunteer.map((v, i) => (
+                <View key={i} style={pdfStyles.bulletRow}>
+                  <PdfText style={pdfStyles.bulletDot}>•</PdfText>
+                  <PdfText style={pdfStyles.bulletText}>{v}</PdfText>
+                </View>
+              ))}
+            </View>
+          ) : null}
+          {data.additionalInfo ? (
+            <View>
+              <PdfText style={pdfStyles.sectionTitleRight}>Additional Information</PdfText>
+              <PdfText style={pdfStyles.bodyText}>{data.additionalInfo}</PdfText>
+            </View>
+          ) : null}
+        </View>
+      </Page>
+    </Document>
+  );
+}
+
+function LinesInput({ label, value, onChange, placeholder, rows = 3 }) {
+  return (
+    <div>
+      <label className="text-sm font-medium text-stone-700">{label}</label>
+      <textarea
+        rows={rows}
+        value={(value || []).join("\n")}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value.split("\n"))}
+        className="mt-1 w-full rounded-xl border border-stone-300 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+      />
+      <p className="text-xs text-stone-400 mt-1">One per line.</p>
+    </div>
+  );
+}
+
+function ExperienceEditor({ items, onChange }) {
+  const update = (idx, patch) => onChange(items.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  const addEntry = () => onChange([...items, { title: "", company: "", duration: "", location: "", bullets: [""] }]);
+  const removeEntry = (idx) => onChange(items.filter((_, i) => i !== idx));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-medium text-stone-700">Professional experience</label>
+        <button type="button" onClick={addEntry} className="text-xs flex items-center gap-1 text-red-800">
+          <Plus size={14} /> Add role
+        </button>
+      </div>
+      {items.map((it, idx) => (
+        <div key={idx} className="border border-stone-200 rounded-xl p-3 space-y-2 relative">
+          <button type="button" onClick={() => removeEntry(idx)} className="absolute top-2 right-2 text-stone-400 hover:text-red-700" aria-label="Remove role">
+            <Trash2 size={14} />
+          </button>
+          <div className="grid grid-cols-2 gap-2 pr-6">
+            <input placeholder="Job title" value={it.title} onChange={(e) => update(idx, { title: e.target.value })}
+              className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <input placeholder="Company" value={it.company} onChange={(e) => update(idx, { company: e.target.value })}
+              className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <input placeholder="Duration (e.g. 2018 – 2021)" value={it.duration} onChange={(e) => update(idx, { duration: e.target.value })}
+              className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <input placeholder="Location" value={it.location} onChange={(e) => update(idx, { location: e.target.value })}
+              className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+          </div>
+          <textarea rows={3} placeholder="One achievement per line" value={(it.bullets || []).join("\n")}
+            onChange={(e) => update(idx, { bullets: e.target.value.split("\n") })}
+            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EducationEditor({ items, onChange }) {
+  const update = (idx, patch) => onChange(items.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  const addEntry = () => onChange([...items, { degree: "", institution: "", year: "", location: "" }]);
+  const removeEntry = (idx) => onChange(items.filter((_, i) => i !== idx));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-medium text-stone-700">Education</label>
+        <button type="button" onClick={addEntry} className="text-xs flex items-center gap-1 text-red-800">
+          <Plus size={14} /> Add
+        </button>
+      </div>
+      {items.map((it, idx) => (
+        <div key={idx} className="border border-stone-200 rounded-xl p-3 grid grid-cols-2 gap-2 relative">
+          <button type="button" onClick={() => removeEntry(idx)} className="absolute top-2 right-2 text-stone-400 hover:text-red-700" aria-label="Remove education entry">
+            <Trash2 size={14} />
+          </button>
+          <input placeholder="Degree / qualification" value={it.degree} onChange={(e) => update(idx, { degree: e.target.value })}
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm col-span-2 pr-6" />
+          <input placeholder="Institution" value={it.institution} onChange={(e) => update(idx, { institution: e.target.value })}
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+          <input placeholder="Year" value={it.year} onChange={(e) => update(idx, { year: e.target.value })}
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+          <input placeholder="Location" value={it.location} onChange={(e) => update(idx, { location: e.target.value })}
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm col-span-2" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function makeResumeFilename(fullName) {
+  const parts = (fullName || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0]}_${parts[parts.length - 1]}_Resume.pdf`;
+  if (parts.length === 1) return `${parts[0]}_Resume.pdf`;
+  return "AVAL_Resume.pdf";
+}
+function ResumePage({ t, lang, resume, onSave, user }) {
+  const [form, setForm] = useState(
+    resume && resume.experience
+      ? resume
+      : {
+          fullName: user?.name || "",
+          jobTitle: "",
+          phone: "",
+          email: user?.email || "",
+          location: "",
+          linkedin: "",
+          photo: null,
+          summary: "",
+          experience: [{ title: "", company: "", duration: "", location: "", bullets: [""] }],
+          education: [{ degree: "", institution: "", year: "", location: "" }],
+          skills: [],
+          languages: [],
+          certifications: [],
+          volunteer: [],
+          household: [],
+          additionalInfo: "",
+        }
+  );
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const [downloading, setDownloading] = useState(false);
+  
+
+  const handlePhoto = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => set("photo", reader.result);
+    reader.readAsDataURL(file);
+  };
+
+  
+
+  const downloadPdf = async () => {
+    setDownloading(true);
+    try {
+      const blob = await pdf(<ResumePDFDocument data={form} />).toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = makeResumeFilename(form.fullName);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-6xl mx-auto px-6 py-10">
       <h1 className="font-display text-3xl text-red-950 mb-2">{t("resume_title")}</h1>
-      <div className="grid sm:grid-cols-2 gap-6 mt-8">
-        <Card className="p-6 space-y-4">
-          {[
-            ["experience", t("field_experience")],
-            ["education", t("q_education")],
-            ["skills", t("your_transferable_skills")],
-            ["certifications", "Certifications"],
-            ["volunteer", "Volunteer / community work"],
-            ["household", t("field_household")],
-            ["breakDuration", t("field_break_duration")],
-          ].map(([key, label]) => (
-            <div key={key}>
-              <label className="text-sm font-medium text-stone-700">{label}</label>
-              <textarea value={form[key]} onChange={(e) => set(key, e.target.value)} rows={key === "household" || key === "experience" ? 3 : 2}
-                className="mt-1 w-full rounded-xl border border-stone-300 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400" />
-            </div>
-          ))}
-        <PrimaryButton onClick={() => onSave(form)} className="w-full">
-  <span style={{ color: "#333333" }}>
-    {t("btn_generate_resume")}
-  </span>
-</PrimaryButton>
+      <p className="text-stone-500 text-sm mb-8">The preview on the right is the exact document you'll download — nothing changes between the two.</p>
+      <div className="grid lg:grid-cols-2 gap-6 items-start">
+        <Card className="p-6 space-y-5 max-h-[900px] overflow-auto">
+          <div>
+            <label className="text-sm font-medium text-stone-700">Professional photo (optional)</label>
+            <input type="file" accept="image/*" onChange={handlePhoto} className="mt-1 block text-sm" />
+            {form.photo && <img src={form.photo} alt="" className="w-16 h-16 rounded-full object-cover mt-2" />}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <input placeholder="Full name" value={form.fullName} onChange={(e) => set("fullName", e.target.value)}
+              className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+            <input placeholder="Target job title" value={form.jobTitle} onChange={(e) => set("jobTitle", e.target.value)}
+              className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+            <input placeholder="Phone" value={form.phone} onChange={(e) => set("phone", e.target.value)}
+              className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+            <input placeholder="Email" value={form.email} onChange={(e) => set("email", e.target.value)}
+              className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+            <input placeholder="Location" value={form.location} onChange={(e) => set("location", e.target.value)}
+              className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+            <input placeholder="LinkedIn URL" value={form.linkedin} onChange={(e) => set("linkedin", e.target.value)}
+              className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+          </div>
+
+                    <div>
+            <label className="text-sm font-medium text-stone-700">Professional summary</label>
+            <textarea rows={4} value={form.summary} onChange={(e) => set("summary", e.target.value)}
+              className="mt-1 w-full rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+          </div>
+
+          <ExperienceEditor items={form.experience} onChange={(v) => set("experience", v)} />
+
+          <LinesInput label="Household & community management (optional)" value={form.household} onChange={(v) => set("household", v)}
+            placeholder={"Managed household budgeting and expenses\nCoordinated children's education schedules"} />
+
+          <EducationEditor items={form.education} onChange={(v) => set("education", v)} />
+
+          <LinesInput label="Skills" value={form.skills} onChange={(v) => set("skills", v)} placeholder={"Communication\nBudgeting"} />
+          <LinesInput label="Languages (optional)" value={form.languages} onChange={(v) => set("languages", v)} placeholder={"English — Native\nTamil — Fluent"} rows={2} />
+          <LinesInput label="Certifications (optional)" value={form.certifications} onChange={(v) => set("certifications", v)} rows={2} />
+          <LinesInput label="Volunteer / community experience (optional)" value={form.volunteer} onChange={(v) => set("volunteer", v)} rows={2} />
+
+          <div>
+            <label className="text-sm font-medium text-stone-700">Additional information (optional)</label>
+            <textarea rows={2} value={form.additionalInfo} onChange={(e) => set("additionalInfo", e.target.value)}
+              className="mt-1 w-full rounded-xl border border-stone-300 px-4 py-2.5 text-sm" />
+          </div>
+
+          <div className="flex gap-3 pt-2 sticky bottom-0 bg-white pb-1">
+            <PrimaryButton onClick={() => onSave(form)} className="flex-1">
+              <span style={{ color: "#333333" }}>{t("btn_generate_resume")}</span>
+            </PrimaryButton>
+            <PrimaryButton onClick={downloadPdf} disabled={downloading} className="flex-1">
+              <span style={{ color: "#333333" }}>{downloading ? "Preparing…" : "Download PDF"}</span>
+            </PrimaryButton>
+          </div>
         </Card>
 
-        <Card className="p-6">
-          <p className="text-xs uppercase tracking-wide text-stone-400 mb-4">Preview</p>
-          <div className="space-y-4 text-sm">
-            <div>
-              <p className="font-display text-lg text-red-950">{t("resume_career_break_label")}</p>
-              {form.breakDuration && <p className="text-stone-500">{form.breakDuration}</p>}
-            </div>
-            {form.household && <div><p className="font-medium text-stone-800">{t("field_household")}</p><p className="text-stone-600">{form.household}</p></div>}
-            {form.experience && <div><p className="font-medium text-stone-800">{t("field_experience")}</p><p className="text-stone-600">{form.experience}</p></div>}
-            {form.education && <div><p className="font-medium text-stone-800">{t("q_education")}</p><p className="text-stone-600">{form.education}</p></div>}
-            {form.skills && <div><p className="font-medium text-stone-800">{t("your_transferable_skills")}</p><p className="text-stone-600">{form.skills}</p></div>}
-            {form.volunteer && <div><p className="font-medium text-stone-800">Volunteer / community work</p><p className="text-stone-600">{form.volunteer}</p></div>}
-            {form.certifications && <div><p className="font-medium text-stone-800">Certifications</p><p className="text-stone-600">{form.certifications}</p></div>}
-          </div>
+        <Card className="p-0 overflow-hidden">
+          <p className="text-xs uppercase tracking-wide text-stone-400 px-6 pt-4 pb-2">Live preview</p>
+          <PDFViewer style={{ width: "100%", height: "860px", border: "none" }} showToolbar={false}>
+            <ResumePDFDocument data={form} />
+          </PDFViewer>
         </Card>
       </div>
     </div>
