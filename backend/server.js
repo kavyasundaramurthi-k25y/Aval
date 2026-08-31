@@ -328,8 +328,8 @@ app.post("/api/voice/tts", async (req, res) => {
       {
         inputs: [text],
         target_language_code: languageCode,
-        speaker: "anushka",
-        model: "bulbul:v2",
+        speaker: "priya",
+        model: "bulbul:v3",
       },
       {
         headers: {
