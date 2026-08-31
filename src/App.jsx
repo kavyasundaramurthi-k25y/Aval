@@ -2495,7 +2495,11 @@ function MentorsPage({ t, lang }) {
                 required
               />
             </div>
-            <PrimaryButton type="submit">Submit application</PrimaryButton>
+            <PrimaryButton type="submit">
+  <span style={{ color: "#333333" }}>
+    Submit application
+  </span>
+</PrimaryButton>
           </form>
         </Card>
       )}
